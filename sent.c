@@ -25,6 +25,8 @@
 
 char *argv0;
 
+int use_inverted_colors = 0;
+
 /* macros */
 #define LEN(a)         (sizeof(a) / sizeof(a)[0])
 #define LIMIT(x, a, b) (x) = (x) < (a) ? (a) : (x) > (b) ? (b) : (x)
@@ -105,6 +107,7 @@ static void xdraw();
 static void xhints();
 static void xinit();
 static void xloadfonts();
+static void togglescm();
 
 static void bpress(XEvent *);
 static void cmessage(XEvent *);
@@ -282,27 +285,66 @@ ffprepare(Image *img)
 	img->state |= SCALED;
 }
 
+static unsigned char double_to_uchar_clamp255(double dbl)
+{
+	dbl = round(dbl);
+
+	return
+		(dbl < 0.0)   ? 0 :
+		(dbl > 255.0) ? 255 : (unsigned char)dbl;
+}
+
+static int int_clamp(int integer, int lower, int upper)
+{
+	if (integer < lower)
+		return lower;
+	else if (integer >= upper)
+		return upper - 1;
+	else
+		return integer;
+}
+
 void
 ffscale(Image *img)
 {
-	unsigned int x, y;
-	unsigned int width = img->ximg->width;
-	unsigned int height = img->ximg->height;
-	char* newBuf = img->ximg->data;
-	unsigned char* ibuf;
-	unsigned int jdy = img->ximg->bytes_per_line / 4 - width;
-	unsigned int dx = (img->bufwidth << 10) / width;
+	const unsigned width = img->ximg->width;
+	const unsigned height = img->ximg->height;
+	unsigned char* newBuf = (unsigned char*)img->ximg->data;
+	const unsigned jdy = img->ximg->bytes_per_line / 4 - width;
 
-	for (y = 0; y < height; y++) {
-		unsigned int bufx = img->bufwidth / width;
-		ibuf = &img->buf[y * img->bufheight / height * img->bufwidth * 3];
+	const double x_scale = ((double)img->bufwidth/(double)width);
+	const double y_scale = ((double)img->bufheight/(double)height);
 
-		for (x = 0; x < width; x++) {
-			*newBuf++ = (ibuf[(bufx >> 10)*3+2]);
-			*newBuf++ = (ibuf[(bufx >> 10)*3+1]);
-			*newBuf++ = (ibuf[(bufx >> 10)*3+0]);
+	for (unsigned y = 0; y < height; ++y) {
+		const double old_y = (double)y * y_scale;
+		const double y_factor = ceil(old_y) - old_y;
+		const int old_y_int_0 = int_clamp((int)floor(old_y), 0, img->bufheight);
+		const int old_y_int_1 = int_clamp((int)ceil(old_y), 0, img->bufheight);
+
+		for (unsigned x = 0; x < width; ++x) {
+			const double old_x = (double)x * x_scale;
+			const double x_factor = ceil(old_x) - old_x;
+			const int old_x_int_0 = int_clamp((int)floor(old_x), 0, img->bufwidth);
+			const int old_x_int_1 = int_clamp((int)ceil(old_x), 0, img->bufwidth);
+
+			const unsigned c00_pos = 3*((old_x_int_0) + ((old_y_int_0)*img->bufwidth));
+			const unsigned c01_pos = 3*((old_x_int_0) + ((old_y_int_1)*img->bufwidth));
+			const unsigned c10_pos = 3*((old_x_int_1) + ((old_y_int_0)*img->bufwidth));
+			const unsigned c11_pos = 3*((old_x_int_1) + ((old_y_int_1)*img->bufwidth));
+
+			for (int i = 2; i >= 0 ; --i) {
+				const unsigned char c00 = img->buf[c00_pos + i];
+				const unsigned char c01 = img->buf[c01_pos + i];
+				const unsigned char c10 = img->buf[c10_pos + i];
+				const unsigned char c11 = img->buf[c11_pos + i];
+
+				const double x_result_0 = (double)c00*x_factor + (double)c10*(1.0 - x_factor);
+				const double x_result_1 = (double)c01*x_factor + (double)c11*(1.0 - x_factor);
+				const double result = x_result_0*y_factor + x_result_1*(1.0 - y_factor);
+
+				*newBuf++ = double_to_uchar_clamp255(result);
+			}
 			newBuf++;
-			bufx += dx;
 		}
 		newBuf += jdy;
 	}
@@ -537,6 +579,12 @@ xdraw()
 			         0,
 			         slides[idx].lines[i],
 			         0);
+		if (idx != 0 && progressheight != 0) {
+			drw_rect(d,
+			         0, xw.h - progressheight,
+			         (xw.w * idx)/(slidecount - 1), progressheight,
+			         1, 0);
+		}
 		drw_map(d, xw.win, 0, 0, xw.w, xw.h);
 	} else {
 		if (!(im->state & SCALED))
@@ -590,7 +638,11 @@ xinit()
 
 	if (!(d = drw_create(xw.dpy, xw.scr, xw.win, xw.w, xw.h)))
 		die("sent: Unable to create drawing context");
-	sc = drw_scm_create(d, colors, 2);
+	if (use_inverted_colors) {
+		sc = drw_scm_create(d, inverted_colors, 2);
+	} else {
+		sc = drw_scm_create(d, colors, 2);
+	}
 	drw_setscheme(d, sc);
 	XSetWindowBackground(xw.dpy, xw.win, sc[ColBg].pixel);
 
@@ -606,6 +658,23 @@ xinit()
 	xhints();
 	XSync(xw.dpy, False);
 }
+
+void
+togglescm()
+{
+    if (use_inverted_colors) {
+        free(sc);
+        sc = drw_scm_create(d, colors, 2);
+        use_inverted_colors = 0;
+    } else {
+        sc = drw_scm_create(d, inverted_colors, 2);
+        use_inverted_colors = 1;
+    }
+    drw_setscheme(d, sc);
+       XSetWindowBackground(xw.dpy, xw.win, sc[ColBg].pixel);
+    xdraw();
+}
+
 
 void
 xloadfonts()
@@ -691,6 +760,9 @@ main(int argc, char *argv[])
 	case 'v':
 		fprintf(stderr, "sent-"VERSION"\n");
 		return 0;
+	case 'i':
+		use_inverted_colors = 1;
+		break;
 	default:
 		usage();
 	} ARGEND
